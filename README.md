@@ -68,7 +68,17 @@ TEST_MYSQL_DSN="it:it_pwd@tcp(127.0.0.1:38109)/gigmatch_it?charset=utf8mb4&parse
 ```
 
 - 下载/校验/解压/初始化/启动/TCP 连通任一阶段失败都会打印 `阶段[xxx]失败` 与具体恢复建议；已下载分片保留，直接重跑 `up` 即断点续传。
-- 可用环境变量覆盖：`IT_HOME`、`IT_MYSQL_PORT`、`IT_MYSQL_DB/USER/PASS`、`IT_MYSQL_VERSION`、`IT_MYSQL_SHA256`。默认 DSN 与脚本一致时第 2 步可省略 `TEST_MYSQL_DSN`。
+- 可用环境变量覆盖：`IT_HOME`、`IT_MYSQL_PORT`、`IT_MYSQL_DB/USER/PASS`、`IT_MYSQL_VERSION`、`IT_MYSQL_SHA256`、`IT_MYSQL_URLS`、`IT_LIBAIO_URLS`。默认 DSN 与脚本一致时第 2 步可省略 `TEST_MYSQL_DSN`。
+
+环境准备脚本自身的生命周期测试（黑盒：本机起真实 HTTP 源制造**中断/损坏/404/续传**，子进程执行脚本并启动**真实 mysqld 进程**，用 mysql 客户端走**独立 TCP 连接**断言；不用 mock、内存库或脚本文本检查）：
+
+```bash
+# 先成功执行过一次 up（在默认缓存目录留下真实官方包与 libaio 作为本地测试源）
+./scripts/setup-integration-mysql.sh up
+go test -tags itlifecycle -count=1 -v ./scripts/
+```
+
+覆盖：中断下载停在「下载 MySQL」阶段并保留分片→换可用源断点续传恢复；损坏包停在「校验 MySQL」阶段并按提示删除重下后恢复；`up→down→up→status→dsn` 进程状态、端口与数据持久性一致（重启后自建标记行仍在）；不可用版本 404 失败后轮换到可用版本成功恢复。可用 `IT_SEED_TARBALL`/`IT_SEED_LIBAIO` 指定种子产物位置。
 
 ### 前端（Vue 3 + TypeScript + Element Plus + Vite）
 

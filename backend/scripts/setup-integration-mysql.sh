@@ -53,11 +53,17 @@ TARBALL_PATH="$IT_HOME/$TARBALL"
 # Official/working sources. The canonical dev.mysql.com endpoint 302-redirects
 # to the versioned CDN archive; direct HEAD on the archive can return 404 even
 # though GET works, so these are always fetched with GET (curl -fL).
-MYSQL_URLS=(
-  "https://dev.mysql.com/get/Downloads/MySQL-8.0/${TARBALL}"
-  "https://cdn.mysql.com//Downloads/MySQL-8.0/${TARBALL}"
-  "https://cdn.mysql.com//archives/mysql-8.0/${TARBALL}"
-)
+# Space-separated IT_MYSQL_URLS overrides the list (used for offline/test feeds).
+if [[ -n "${IT_MYSQL_URLS:-}" ]]; then
+  # shellcheck disable=SC2206
+  MYSQL_URLS=( ${IT_MYSQL_URLS} )
+else
+  MYSQL_URLS=(
+    "https://dev.mysql.com/get/Downloads/MySQL-8.0/${TARBALL}"
+    "https://cdn.mysql.com//Downloads/MySQL-8.0/${TARBALL}"
+    "https://cdn.mysql.com//archives/mysql-8.0/${TARBALL}"
+  )
+fi
 
 # SHA-256 of the official generic tarball (computed from the file served by
 # dev.mysql.com/get, which 302-redirects to the versioned CDN archive). Override
@@ -71,16 +77,21 @@ EXPECTED_SHA="${IT_MYSQL_SHA256:-$DEFAULT_SHA}"
 # libaio is a hard runtime dependency of mysqld on Linux.
 LIBAIO_PKG_VERSION="0.3.113-4"
 LIBAIO_SO_DIR="$LIBAIO_DIR/usr/lib/${ARCH_DIR}-linux-gnu"
-LIBAIO_DEB_NAME="libaio1_${LIBAIO_PKG_VERSION}_${ARCH_DIR/deb64/amd64}.deb"
 case "$ARCH_DIR" in
   aarch64) LIBAIO_DEB_NAME="libaio1_${LIBAIO_PKG_VERSION}_arm64.deb" ;;
   x86_64)  LIBAIO_DEB_NAME="libaio1_${LIBAIO_PKG_VERSION}_amd64.deb" ;;
 esac
-LIBAIO_URLS=(
-  "https://deb.debian.org/debian/pool/main/liba/libaio/${LIBAIO_DEB_NAME}"
-  "http://ftp.debian.org/debian/pool/main/liba/libaio/${LIBAIO_DEB_NAME}"
-  "https://mirrors.tuna.tsinghua.edu.cn/debian/pool/main/liba/libaio/${LIBAIO_DEB_NAME}"
-)
+# Space-separated IT_LIBAIO_URLS overrides the list (used for offline/test feeds).
+if [[ -n "${IT_LIBAIO_URLS:-}" ]]; then
+  # shellcheck disable=SC2206
+  LIBAIO_URLS=( ${IT_LIBAIO_URLS} )
+else
+  LIBAIO_URLS=(
+    "https://deb.debian.org/debian/pool/main/liba/libaio/${LIBAIO_DEB_NAME}"
+    "http://ftp.debian.org/debian/pool/main/liba/libaio/${LIBAIO_DEB_NAME}"
+    "https://mirrors.tuna.tsinghua.edu.cn/debian/pool/main/liba/libaio/${LIBAIO_DEB_NAME}"
+  )
+fi
 
 # ---------------------------------------------------------------------------
 # Logging / helpers
