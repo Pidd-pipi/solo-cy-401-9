@@ -42,16 +42,33 @@ go run ./cmd/server
 
 构建检查：`go build ./...`；测试：`go test ./...`
 
-合同变更并发集成测试（真实 MySQL/InnoDB，多 TCP 连接、行锁与唯一索引；不使用内存库、mock 或单连接串行化）：
+合同变更并发集成测试（真实 MySQL 8 / InnoDB，**独立 TCP 连接池**、行锁与唯一索引；不使用内存库、mock 或单连接串行化）：
 
 ```bash
-# 1) 准备真实 MySQL（无需 root/Docker，官方通用包装到用户目录）
+cd backend
+
+# 1) 一键准备真实 MySQL（无需 root/Docker）。脚本会：
+#    从 dev.mysql.com/get（302 到版本化 CDN）多源回退下载官方通用包，
+#    断点续传（curl -C -）、SHA-256 校验、解压，自动提取 libaio，
+#    初始化独立数据目录并启动监听 127.0.0.1:38109 的隔离实例。
 ./scripts/setup-integration-mysql.sh up
-# 2) 运行集成测试（审批×完成、审批×拒绝、撤回×审批、双重审批、守恒拒绝）
+
+# 2) 运行集成测试（审批×完成、审批×拒绝、撤回×审批、双重审批+失败重试、守恒拒绝）
 TEST_MYSQL_DSN="it:it_pwd@tcp(127.0.0.1:38109)/gigmatch_it?charset=utf8mb4&parseTime=true&loc=Local" \
   go test -tags integration -count=1 ./internal/service/
-# 停止 / 清理：./scripts/setup-integration-mysql.sh down | clean
 ```
+
+辅助命令与故障恢复：
+
+```bash
+./scripts/setup-integration-mysql.sh status   # 探测实例并打印 DSN
+./scripts/setup-integration-mysql.sh dsn       # 仅打印 DSN
+./scripts/setup-integration-mysql.sh down      # 停止（数据保留，再 up 无需重新下载/初始化）
+./scripts/setup-integration-mysql.sh clean     # 停止并删除数据目录
+```
+
+- 下载/校验/解压/初始化/启动/TCP 连通任一阶段失败都会打印 `阶段[xxx]失败` 与具体恢复建议；已下载分片保留，直接重跑 `up` 即断点续传。
+- 可用环境变量覆盖：`IT_HOME`、`IT_MYSQL_PORT`、`IT_MYSQL_DB/USER/PASS`、`IT_MYSQL_VERSION`、`IT_MYSQL_SHA256`。默认 DSN 与脚本一致时第 2 步可省略 `TEST_MYSQL_DSN`。
 
 ### 前端（Vue 3 + TypeScript + Element Plus + Vite）
 
