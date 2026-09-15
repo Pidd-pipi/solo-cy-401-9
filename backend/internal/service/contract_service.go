@@ -129,6 +129,14 @@ func (s *ContractService) Complete(id uint, userID uint, userName string) (*mode
 		if txErr != nil {
 			return txErr
 		}
+		// Optimistic-lock snapshot check: if a change approval (or any other
+		// mutation) committed between this request reading the contract and
+		// acquiring the row lock, the snapshot is stale. Refuse with a clear
+		// conflict so the requester refreshes and re-confirms against the new
+		// total/stages instead of silently completing an outdated contract.
+		if live.LockVersion != c.LockVersion {
+			return constants.NewAppError(constants.CodeConflict, "合同刚被变更，请刷新后重新确认完成")
+		}
 		if live.Status != constants.ContractInProgress && live.Status != constants.ContractPendingReview {
 			return constants.NewAppError(constants.CodeConflict, "合同当前不可完成确认")
 		}
