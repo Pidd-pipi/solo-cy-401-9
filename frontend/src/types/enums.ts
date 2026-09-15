@@ -34,6 +34,20 @@ export enum UserRole {
   Admin = 'admin'
 }
 
+// 合同变更单状态（与后端 backend/internal/constants/contract_change_status.go 对齐）
+export enum ContractChangeStatus {
+  Pending = 'pending',
+  Approved = 'approved',
+  Rejected = 'rejected',
+  Withdrawn = 'withdrawn'
+}
+
+// 变更发起方（与后端 backend/internal/constants/contract_change_status.go 对齐）
+export enum ContractChangeParty {
+  PartyA = 'party_a',
+  PartyB = 'party_b'
+}
+
 export const RequirementStatusLabel: Record<string, string> = {
   draft: '草稿',
   open: '待报价',
@@ -64,4 +78,16 @@ export const RoleLabel: Record<string, string> = {
   freelancer: '自由职业者',
   both: '双角色',
   admin: '管理员'
+};
+
+export const ContractChangeStatusLabel: Record<string, string> = {
+  pending: '待处理',
+  approved: '已同意',
+  rejected: '已拒绝',
+  withdrawn: '已撤回'
+};
+
+export const ContractChangePartyLabel: Record<string, string> = {
+  party_a: '甲方',
+  party_b: '乙方'
 };

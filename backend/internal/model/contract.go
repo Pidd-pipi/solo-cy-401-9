@@ -30,10 +30,11 @@ type Contract struct {
 	UpdatedAt     time.Time `json:"-"`
 
 	// Computed fields.
-	Stages    []ContractStage `gorm:"-" json:"stages"`
-	PartyA    *User           `gorm:"foreignKey:PartyAID" json:"partyA"`
-	PartyB    *User           `gorm:"foreignKey:PartyBID" json:"partyB"`
-	Requirement *Requirement  `gorm:"foreignKey:RequirementID" json:"requirement"`
+	Stages       []ContractStage `gorm:"-" json:"stages"`
+	PartyA       *User           `gorm:"foreignKey:PartyAID" json:"partyA"`
+	PartyB       *User           `gorm:"foreignKey:PartyBID" json:"partyB"`
+	Requirement  *Requirement    `gorm:"foreignKey:RequirementID" json:"requirement"`
+	ActiveChange *ContractChange `gorm:"-" json:"activeChange,omitempty"`
 }
 
 // BeforeSave serializes stages.

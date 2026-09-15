@@ -12,13 +12,14 @@ import (
 // ContractService manages contracts.
 type ContractService struct {
 	contracts *repository.ContractRepository
+	changes   *repository.ContractChangeRepository
 	logs      *OperationLogService
 	logger    *slog.Logger
 }
 
 // NewContractService builds a ContractService.
-func NewContractService(contracts *repository.ContractRepository, logs *OperationLogService, logger *slog.Logger) *ContractService {
-	return &ContractService{contracts: contracts, logs: logs, logger: logger}
+func NewContractService(contracts *repository.ContractRepository, changes *repository.ContractChangeRepository, logs *OperationLogService, logger *slog.Logger) *ContractService {
+	return &ContractService{contracts: contracts, changes: changes, logs: logs, logger: logger}
 }
 
 // ListByParty returns contracts involving the caller.
@@ -27,12 +28,24 @@ func (s *ContractService) ListByParty(userID uint) ([]model.Contract, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list contracts: %w", err)
 	}
+	if err := s.changes.FillActive(list); err != nil {
+		return nil, fmt.Errorf("attach active changes: %w", err)
+	}
 	return list, nil
 }
 
-// Get loads a contract.
+// Get loads a contract with its pending change (if any).
 func (s *ContractService) Get(id uint) (*model.Contract, error) {
-	return s.contracts.FindByID(id)
+	c, err := s.contracts.FindByID(id)
+	if err != nil {
+		return nil, err
+	}
+	active, err := s.changes.FindPendingByContractID(c.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load active change: %w", err)
+	}
+	c.ActiveChange = active
+	return c, nil
 }
 
 // CreateFromBid builds a contract from an accepted bid.
@@ -82,7 +95,8 @@ func (s *ContractService) Sign(id uint, userID uint, userName string) (*model.Co
 	return c, nil
 }
 
-// Complete confirms completion (requester side).
+// Complete confirms completion (requester side). A pending change order pauses
+// completion until the parties settle it.
 func (s *ContractService) Complete(id uint, userID uint, userName string) (*model.Contract, error) {
 	c, err := s.contracts.FindByID(id)
 	if err != nil {
@@ -93,6 +107,13 @@ func (s *ContractService) Complete(id uint, userID uint, userName string) (*mode
 	}
 	if c.Status != constants.ContractInProgress && c.Status != constants.ContractPendingReview {
 		return nil, constants.NewAppError(constants.CodeConflict, "合同当前不可完成确认")
+	}
+	pending, err := s.changes.FindPendingByContractID(c.ID)
+	if err != nil {
+		return nil, fmt.Errorf("check pending change: %w", err)
+	}
+	if pending != nil {
+		return nil, constants.NewAppError(constants.CodeConflict, "存在待处理合同变更，请先处理后再完成合同")
 	}
 	c.Status = constants.ContractCompleted
 	for i := range c.Stages {

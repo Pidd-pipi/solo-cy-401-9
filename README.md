@@ -26,6 +26,7 @@ docker compose up -d --build
 - 需求详情：完整信息 + 报价列表（需求方视角）+ 报价提交表单（自由职业者视角）
 - 我的工作台：分角色展示已发布需求、已报价项目、进行中合同
 - 合同详情：条款、阶段进度（分阶段付款进度条）、双方信息
+- 合同变更单：进行中/待确认完成的合同，任一方可发起变更（原因、范围、金额增减、阶段金额调整）；同一合同仅允许一张待处理变更；另一方同意后原子更新总额与阶段（未完成阶段合计恒等于新总额），可拒绝/撤回；待处理变更期间暂停完成合同
 - 个人资料：展示/编辑个人信息、技能标签、历史项目
 - 横切：JWT 认证授权、操作日志、路由守卫、请求拦截器自动带 token
 
@@ -107,6 +108,8 @@ npm run dev
 | RequirementStatus（draft/open/bidding/in_progress/pending_review/completed/cancelled） | `backend/internal/constants/requirement_status.go` | `frontend/src/types/enums.ts` | Requirements、RequirementDetail、Dashboard |
 | BidStatus（pending/accepted/rejected/withdrawn） | `backend/internal/constants/bid_status.go` | `frontend/src/types/enums.ts` | RequirementDetail、Dashboard |
 | ContractStatus（pending_signature/in_progress/pending_review/completed/terminated） | `backend/internal/constants/contract_status.go` | `frontend/src/types/enums.ts` | ContractDetail、Dashboard |
+| ContractChangeStatus（pending/approved/rejected/withdrawn） | `backend/internal/constants/contract_change_status.go` | `frontend/src/types/enums.ts` | ContractDetail、ContractChangePanel、ContractCard、Dashboard |
+| ContractChangeParty（party_a/party_b） | `backend/internal/constants/contract_change_status.go` | `frontend/src/types/enums.ts`（ContractChangeParty） | ContractChangePanel |
 | UserRole（requester/freelancer/both/admin） | `backend/internal/constants/roles.go` | `frontend/src/types/enums.ts` | Layout、RequirementDetail、Dashboard |
 
 ## 主要 API 列表
@@ -125,6 +128,9 @@ npm run dev
 | GET | /api/v1/contracts | 我的合同 |
 | GET | /api/v1/contracts/:id | 合同详情 |
 | POST | /api/v1/contracts/:id/sign · /complete | 签署/完成 |
+| GET/POST | /api/v1/contracts/:id/changes | 变更历史/发起变更单 |
+| GET | /api/v1/contracts/:id/changes/:changeId | 变更单详情 |
+| POST | /api/v1/contracts/:id/changes/:changeId/approve · /reject · /withdraw | 同意（同步总额与阶段）/拒绝/撤回 |
 | GET | /api/v1/dashboard | 我的工作台 |
 | GET/PATCH | /api/v1/users/:id | 个人资料 |
 | GET | /api/v1/operation-logs | 操作日志 |

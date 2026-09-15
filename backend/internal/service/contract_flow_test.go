@@ -20,7 +20,7 @@ func newFlowTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&model.User{}, &model.Requirement{}, &model.Bid{}, &model.Contract{}, &model.OperationLog{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Requirement{}, &model.Bid{}, &model.Contract{}, &model.ContractChange{}, &model.OperationLog{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -34,6 +34,7 @@ func TestAcceptBidCreatesContract(t *testing.T) {
 	reqRepo := repository.NewRequirementRepository(db)
 	bidRepo := repository.NewBidRepository(db)
 	contractRepo := repository.NewContractRepository(db)
+	changeRepo := repository.NewContractChangeRepository(db)
 	logRepo := repository.NewOperationLogRepository(db)
 
 	requester := &model.User{Username: "req1", PasswordHash: "x", Name: "需求方", Role: constants.RoleRequester}
@@ -46,7 +47,7 @@ func TestAcceptBidCreatesContract(t *testing.T) {
 	}
 
 	logSvc := NewOperationLogService(logRepo, logger)
-	contractSvc := NewContractService(contractRepo, logSvc, logger)
+	contractSvc := NewContractService(contractRepo, changeRepo, logSvc, logger)
 	reqSvc := NewRequirementService(reqRepo, bidRepo, logSvc, logger)
 	bidSvc := NewBidService(bidRepo, reqRepo, logSvc, logger)
 

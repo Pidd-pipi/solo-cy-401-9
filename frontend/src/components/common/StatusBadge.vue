@@ -7,13 +7,24 @@ import { computed } from 'vue';
 import {
   RequirementStatusLabel,
   BidStatusLabel,
-  ContractStatusLabel
+  ContractStatusLabel,
+  ContractChangeStatusLabel
 } from '../../types/enums';
 
-const props = defineProps<{ status: string; kind?: 'requirement' | 'bid' | 'contract' }>();
+const props = defineProps<{
+  status: string;
+  kind?: 'requirement' | 'bid' | 'contract' | 'change';
+}>();
 
 const label = computed(() => {
-  const map = props.kind === 'bid' ? BidStatusLabel : props.kind === 'contract' ? ContractStatusLabel : RequirementStatusLabel;
+  const map =
+    props.kind === 'bid'
+      ? BidStatusLabel
+      : props.kind === 'contract'
+        ? ContractStatusLabel
+        : props.kind === 'change'
+          ? ContractChangeStatusLabel
+          : RequirementStatusLabel;
   return map[props.status] || props.status;
 });
 
@@ -31,6 +42,7 @@ const tagType = computed(() => {
       return 'primary';
     case 'completed':
     case 'done':
+    case 'approved':
       return 'success';
     case 'cancelled':
     case 'rejected':

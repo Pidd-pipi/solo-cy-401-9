@@ -49,6 +49,7 @@ func run(logger *slog.Logger) error {
 		&model.Requirement{},
 		&model.Bid{},
 		&model.Contract{},
+		&model.ContractChange{},
 		&model.OperationLog{},
 	); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
@@ -139,23 +140,26 @@ func buildHandlers(cfg *config.Config, db *gorm.DB, logger *slog.Logger) (*route
 	reqRepo := repository.NewRequirementRepository(db)
 	bidRepo := repository.NewBidRepository(db)
 	contractRepo := repository.NewContractRepository(db)
+	changeRepo := repository.NewContractChangeRepository(db)
 	logRepo := repository.NewOperationLogRepository(db)
 
 	logSvc := service.NewOperationLogService(logRepo, logger)
 	authSvc := service.NewAuthService(cfg, userRepo, logSvc, logger)
 	userSvc := service.NewUserService(userRepo, logSvc, logger)
-	contractSvc := service.NewContractService(contractRepo, logSvc, logger)
+	contractSvc := service.NewContractService(contractRepo, changeRepo, logSvc, logger)
+	changeSvc := service.NewContractChangeService(db, contractRepo, changeRepo, logSvc, logger)
 	bidSvc := service.NewBidService(bidRepo, reqRepo, logSvc, logger)
 	reqSvc := service.NewRequirementService(reqRepo, bidRepo, logSvc, logger)
-	dashboardSvc := service.NewDashboardService(reqRepo, bidRepo, contractRepo, logger)
+	dashboardSvc := service.NewDashboardService(reqRepo, bidRepo, contractRepo, changeRepo, logger)
 
 	return &router.Handlers{
-		Auth:         handler.NewAuthHandler(authSvc, logger),
-		User:         handler.NewUserHandler(userSvc, logger),
-		Requirement:  handler.NewRequirementHandler(reqSvc, contractSvc, logger),
-		Bid:          handler.NewBidHandler(bidSvc, logger),
-		Contract:     handler.NewContractHandler(contractSvc, logger),
-		Dashboard:    handler.NewDashboardHandler(dashboardSvc, logger),
-		OperationLog: handler.NewOperationLogHandler(logSvc, logger),
+		Auth:           handler.NewAuthHandler(authSvc, logger),
+		User:           handler.NewUserHandler(userSvc, logger),
+		Requirement:    handler.NewRequirementHandler(reqSvc, contractSvc, logger),
+		Bid:            handler.NewBidHandler(bidSvc, logger),
+		Contract:       handler.NewContractHandler(contractSvc, logger),
+		ContractChange: handler.NewContractChangeHandler(changeSvc, logger),
+		Dashboard:      handler.NewDashboardHandler(dashboardSvc, logger),
+		OperationLog:   handler.NewOperationLogHandler(logSvc, logger),
 	}, userRepo, logSvc
 }

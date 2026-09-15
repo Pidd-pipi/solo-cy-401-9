@@ -20,12 +20,13 @@ type DashboardService struct {
 	requirements *repository.RequirementRepository
 	bids         *repository.BidRepository
 	contracts    *repository.ContractRepository
+	changes      *repository.ContractChangeRepository
 	logger       *slog.Logger
 }
 
 // NewDashboardService builds a DashboardService.
-func NewDashboardService(requirements *repository.RequirementRepository, bids *repository.BidRepository, contracts *repository.ContractRepository, logger *slog.Logger) *DashboardService {
-	return &DashboardService{requirements: requirements, bids: bids, contracts: contracts, logger: logger}
+func NewDashboardService(requirements *repository.RequirementRepository, bids *repository.BidRepository, contracts *repository.ContractRepository, changes *repository.ContractChangeRepository, logger *slog.Logger) *DashboardService {
+	return &DashboardService{requirements: requirements, bids: bids, contracts: contracts, changes: changes, logger: logger}
 }
 
 // Get returns the workbench payload for a user.
@@ -40,6 +41,9 @@ func (s *DashboardService) Get(userID uint) (*DashboardData, error) {
 	}
 	myContracts, err := s.contracts.ListByParty(userID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.changes.FillActive(myContracts); err != nil {
 		return nil, err
 	}
 	reqCount, err := s.requirements.CountByPublisher(userID)

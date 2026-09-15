@@ -19,6 +19,11 @@ func NewContractRepository(db *gorm.DB) *ContractRepository {
 	return &ContractRepository{db: db}
 }
 
+// WithTx returns a repository bound to the given transaction.
+func (r *ContractRepository) WithTx(tx *gorm.DB) *ContractRepository {
+	return &ContractRepository{db: tx}
+}
+
 // Create inserts a contract.
 func (r *ContractRepository) Create(c *model.Contract) error {
 	if err := r.db.Create(c).Error; err != nil {

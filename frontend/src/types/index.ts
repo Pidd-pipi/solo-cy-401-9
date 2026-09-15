@@ -64,6 +64,39 @@ export interface Contract {
   partyA?: User;
   partyB?: User;
   requirement?: Requirement;
+  activeChange?: ContractChange | null;
+}
+
+export interface ContractChange {
+  id: number;
+  contractId: number;
+  reason: string;
+  scope: string;
+  amountDelta: number;
+  originalAmount: number;
+  newAmount: number;
+  originalStages: ContractStage[];
+  proposedStages: ContractStage[];
+  status: string;
+  proposerId: number;
+  proposerName: string;
+  proposerParty: string;
+  responderId?: number;
+  responderName?: string;
+  respondedAt?: string;
+  createdAt?: string;
+}
+
+export interface CreateContractChangePayload {
+  reason: string;
+  scope: string;
+  amountDelta: number;
+  stages: ContractStage[];
+}
+
+export interface ApproveChangeResult {
+  change: ContractChange;
+  contract: Contract;
 }
 
 export interface PageResult<T> {

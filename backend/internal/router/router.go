@@ -23,13 +23,14 @@ import (
 
 // Handlers aggregates every HTTP handler for assembly.
 type Handlers struct {
-	Auth         *handler.AuthHandler
-	User         *handler.UserHandler
-	Requirement  *handler.RequirementHandler
-	Bid          *handler.BidHandler
-	Contract     *handler.ContractHandler
-	Dashboard    *handler.DashboardHandler
-	OperationLog *handler.OperationLogHandler
+	Auth           *handler.AuthHandler
+	User           *handler.UserHandler
+	Requirement    *handler.RequirementHandler
+	Bid            *handler.BidHandler
+	Contract       *handler.ContractHandler
+	ContractChange *handler.ContractChangeHandler
+	Dashboard      *handler.DashboardHandler
+	OperationLog   *handler.OperationLogHandler
 }
 
 // New assembles the Gin engine and registers all routes.
@@ -86,6 +87,12 @@ func New(cfg *config.Config, logger *slog.Logger, h *Handlers, users *repository
 		protected.GET("/contracts/:id", h.Contract.Get)
 		protected.POST("/contracts/:id/sign", h.Contract.Sign)
 		protected.POST("/contracts/:id/complete", h.Contract.Complete)
+		protected.GET("/contracts/:id/changes", h.ContractChange.List)
+		protected.POST("/contracts/:id/changes", h.ContractChange.Create)
+		protected.GET("/contracts/:id/changes/:changeId", h.ContractChange.Get)
+		protected.POST("/contracts/:id/changes/:changeId/approve", h.ContractChange.Approve)
+		protected.POST("/contracts/:id/changes/:changeId/reject", h.ContractChange.Reject)
+		protected.POST("/contracts/:id/changes/:changeId/withdraw", h.ContractChange.Withdraw)
 		protected.GET("/dashboard", h.Dashboard.Get)
 		protected.GET("/operation-logs", h.OperationLog.List)
 	}
