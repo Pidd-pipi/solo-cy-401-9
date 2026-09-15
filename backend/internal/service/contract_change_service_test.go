@@ -84,7 +84,7 @@ func buildChangeFixture(t *testing.T) *changeFixture {
 	}
 
 	logSvc := NewOperationLogService(logRepo, logger)
-	contractSvc := NewContractService(contractRepo, changeRepo, logSvc, logger)
+	contractSvc := NewContractService(db, contractRepo, changeRepo, logSvc, logger)
 	changeSvc := NewContractChangeService(db, contractRepo, changeRepo, logSvc, logger)
 	reqSvc := NewRequirementService(reqRepo, bidRepo, logSvc, logger)
 	bidSvc := NewBidService(bidRepo, reqRepo, logSvc, logger)
@@ -127,20 +127,24 @@ func buildChangeFixture(t *testing.T) *changeFixture {
 	}
 }
 
-// validChangeRequest builds a conservation-valid change request: done stages
-// are preserved and the proposed new total is spread evenly across the
-// unfinished stages.
+// validChangeRequest builds a conservation-valid change request under the
+// frozen-done-stage rule: done stages are copied verbatim and the remaining
+// amount (new total minus done sum) is spread evenly across unfinished stages.
 func validChangeRequest(total, delta float64, stages []model.ContractStage, reason, scope string) dto.CreateContractChangeRequest {
 	newTotal := round2(total + delta)
 	proposed := make([]dto.ChangeStageItem, 0, len(stages))
+	var doneSum float64
 	unfinished := 0
 	for _, st := range stages {
-		if st.Status != "done" {
+		if st.Status == "done" {
+			doneSum += st.Amount
+		} else {
 			unfinished++
 		}
 	}
-	each := round2(newTotal / float64(unfinished))
-	remaining := round2(newTotal - each*float64(unfinished-1))
+	remaining := round2(newTotal - round2(doneSum))
+	each := round2(remaining / float64(unfinished))
+	last := round2(remaining - each*float64(unfinished-1))
 	idx := 0
 	for _, st := range stages {
 		item := dto.ChangeStageItem{Name: st.Name, Status: st.Status, DueAt: st.DueAt}
@@ -149,7 +153,7 @@ func validChangeRequest(total, delta float64, stages []model.ContractStage, reas
 		} else {
 			idx++
 			if idx == unfinished {
-				item.Amount = remaining
+				item.Amount = last
 			} else {
 				item.Amount = each
 			}
@@ -256,14 +260,24 @@ func TestContractChangeAppliesAtomicallyOnApprove(t *testing.T) {
 	if updated.TotalAmount != 40000 {
 		t.Fatalf("total = %v, want 40000", updated.TotalAmount)
 	}
-	var unfinishedSum float64
+	// New invariant: total == done amounts + unfinished amounts, and the done
+	// stage keeps its original name/amount/status.
+	var doneSum, unfinishedSum float64
 	for _, st := range updated.Stages {
-		if st.Status != "done" {
+		if st.Status == "done" {
+			doneSum += st.Amount
+		} else {
 			unfinishedSum += st.Amount
 		}
 	}
-	if round2(unfinishedSum) != 40000 {
-		t.Fatalf("unfinished stages sum = %v, want new total 40000", unfinishedSum)
+	if round2(doneSum+unfinishedSum) != 40000 {
+		t.Fatalf("stage sum = %v, want new total 40000", round2(doneSum+unfinishedSum))
+	}
+	if round2(unfinishedSum) != 31000 || round2(doneSum) != 9000 {
+		t.Fatalf("done=%v unfinished=%v, want 9000/31000", doneSum, unfinishedSum)
+	}
+	if updated.Stages[0].Name != f.contract.Stages[0].Name || updated.Stages[0].Amount != f.contract.Stages[0].Amount || updated.Stages[0].Status != "done" {
+		t.Fatalf("done stage must be frozen, got %+v", updated.Stages[0])
 	}
 
 	// Persistence: re-read through the contract service.
@@ -417,4 +431,219 @@ func TestConcurrentSettlementOnlyOneWins(t *testing.T) {
 	if c.TotalAmount != 36000 {
 		t.Fatalf("total = %v, want 36000", c.TotalAmount)
 	}
+}
+
+// TestValidateChangeStagesFreezesDoneStages verifies the repaired conservation
+// rule: settled milestones are immutable and the new total must equal the done
+// amount plus the unfinished stage amounts.
+func TestValidateChangeStagesFreezesDoneStages(t *testing.T) {
+	original := []model.ContractStage{
+		{Name: "项目启动", Amount: 9000, Status: "done", DueAt: "签约后3日内"},
+		{Name: "中期交付", Amount: 12000, Status: "in_progress", DueAt: "工期过半"},
+		{Name: "验收结项", Amount: 9000, Status: "pending", DueAt: "验收通过后"},
+	}
+	const total = 30000.0
+
+	clone := func() []model.ContractStage {
+		out := make([]model.ContractStage, len(original))
+		copy(out, original)
+		return out
+	}
+	// A valid proposal: done 9000 frozen, unfinished 15000+16000 = 31000, new total 40000.
+	valid := func() []model.ContractStage {
+		p := clone()
+		p[1].Amount = 15000
+		p[2].Amount = 16000
+		return p
+	}
+
+	t.Run("valid proposal passes and returns new total", func(t *testing.T) {
+		got, err := validateChangeStages(original, valid(), total, 10000)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != 40000 {
+			t.Fatalf("newTotal = %v, want 40000", got)
+		}
+	})
+
+	t.Run("tampering a done stage amount is rejected", func(t *testing.T) {
+		p := valid()
+		p[0].Amount = 9001
+		_, err := validateChangeStages(original, p, total, 10000)
+		isBadRequestAppError(t, err, "已完成阶段")
+	})
+
+	t.Run("tampering a done stage name is rejected", func(t *testing.T) {
+		p := valid()
+		p[0].Name = "改名"
+		_, err := validateChangeStages(original, p, total, 10000)
+		isBadRequestAppError(t, err, "已完成阶段")
+	})
+
+	t.Run("reopening a done stage is rejected", func(t *testing.T) {
+		p := valid()
+		p[0].Status = "pending"
+		_, err := validateChangeStages(original, p, total, 10000)
+		isBadRequestAppError(t, err, "已完成阶段")
+	})
+
+	t.Run("deleting a stage is rejected", func(t *testing.T) {
+		p := valid()
+		_, err := validateChangeStages(original, p[:2], total, 10000)
+		isBadRequestAppError(t, err, "阶段数量")
+	})
+
+	t.Run("flipping an unfinished stage to done is rejected", func(t *testing.T) {
+		p := valid()
+		p[1].Status = "done"
+		_, err := validateChangeStages(original, p, total, 10000)
+		isBadRequestAppError(t, err, "不能通过变更单标记为已完成")
+	})
+
+	t.Run("new total below done amount is rejected", func(t *testing.T) {
+		p := clone()
+		// Declared new total 30000 - 25000 = 5000, below the settled 9000.
+		p[1].Amount = 0
+		p[2].Amount = 0
+		_, err := validateChangeStages(original, p, total, -25000)
+		isBadRequestAppError(t, err, "不能低于已完成阶段金额")
+	})
+
+	t.Run("done plus unfinished not equal to new total is rejected", func(t *testing.T) {
+		p := valid()
+		p[2].Amount += 500 // 9000 + 15000 + 16500 = 40500 != 40000
+		_, err := validateChangeStages(original, p, total, 10000)
+		isBadRequestAppError(t, err, "金额不守恒")
+	})
+}
+
+// TestApproveReadBackIsConsistent verifies the approved contract, re-read from
+// the database, satisfies total == sum(all stages) and matches the proposal.
+func TestApproveReadBackIsConsistent(t *testing.T) {
+	f := buildChangeFixture(t)
+	req := validChangeRequest(f.contract.TotalAmount, 10000, f.contract.Stages, "范围扩大", "增加支付模块")
+	ch, err := f.changeSvc.Create(f.contract.ID, req, f.partyA.ID, f.partyA.Name)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, updated, err := f.changeSvc.Approve(f.contract.ID, ch.ID, f.partyB.ID, f.partyB.Name)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	var sum float64
+	for _, st := range updated.Stages {
+		sum += st.Amount
+	}
+	if round2(sum) != updated.TotalAmount {
+		t.Fatalf("stage sum %v != total %v after read-back", round2(sum), updated.TotalAmount)
+	}
+	if updated.TotalAmount != ch.NewAmount {
+		t.Fatalf("total %v != approved new amount %v", updated.TotalAmount, ch.NewAmount)
+	}
+}
+
+// TestCompleteVsApproveRaceStable runs completion and approval of the same
+// contract concurrently and asserts that every possible serialization leaves a
+// consistent final state: no partial write, no stale snapshot overwrite, and
+// change history that agrees with the contract terminal state.
+func TestCompleteVsApproveRaceStable(t *testing.T) {
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		f := buildChangeFixture(t)
+		// Party B proposes so party A (the only one who can complete) approves.
+		req := validChangeRequest(f.contract.TotalAmount, 8000, f.contract.Stages, "并发", "完成与审批同时发生")
+		ch, err := f.changeSvc.Create(f.contract.ID, req, f.partyB.ID, f.partyB.Name)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		var completeErr, approveErr error
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, completeErr = f.contractSvc.Complete(f.contract.ID, f.partyA.ID, f.partyA.Name)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, approveErr = f.changeSvc.Approve(f.contract.ID, ch.ID, f.partyA.ID, f.partyA.Name)
+		}()
+		close(start)
+		wg.Wait()
+
+		finalContract, err := f.contractSvc.Get(f.contract.ID)
+		if err != nil {
+			t.Fatalf("reload contract: %v", err)
+		}
+		finalChange, err := f.changeSvc.Get(f.contract.ID, ch.ID, f.partyA.ID)
+		if err != nil {
+			t.Fatalf("reload change: %v", err)
+		}
+
+		// Universal invariant 1: stage amounts always sum to the total.
+		var sum float64
+		for _, st := range finalContract.Stages {
+			sum += st.Amount
+		}
+		if round2(sum) != finalContract.TotalAmount {
+			t.Fatalf("iter %d: stage sum %v != total %v", i, round2(sum), finalContract.TotalAmount)
+		}
+
+		// Universal invariant 2: completed contracts carry no pending change.
+		if finalContract.Status == constants.ContractCompleted && finalChange.Status == constants.ChangePending {
+			t.Fatalf("iter %d: completed contract still has a pending change", i)
+		}
+
+		// Universal invariant 3: if the order was approved, the contract must
+		// reflect exactly its amount and stage amounts/names, never the old
+		// snapshot. If completion also ran afterwards, every stage is legally
+		// marked done; otherwise statuses match the proposal.
+		if finalChange.Status == constants.ChangeApproved {
+			if finalContract.TotalAmount != ch.NewAmount {
+				t.Fatalf("iter %d: approved total %v not applied, contract %v", i, ch.NewAmount, finalContract.TotalAmount)
+			}
+			if len(finalContract.Stages) != len(finalChange.ProposedStages) {
+				t.Fatalf("iter %d: stage count mismatch", i)
+			}
+			completed := finalContract.Status == constants.ContractCompleted
+			for j := range finalContract.Stages {
+				got, want := finalContract.Stages[j], finalChange.ProposedStages[j]
+				if got.Name != want.Name || !amountsEqual(got.Amount, want.Amount) {
+					t.Fatalf("iter %d: stage %d name/amount = %+v, want %+v", i, j, got, want)
+				}
+				if completed {
+					if got.Status != "done" {
+						t.Fatalf("iter %d: completed contract stage %d status = %s, want done", i, j, got.Status)
+					}
+				} else if got.Status != want.Status {
+					t.Fatalf("iter %d: stage %d status = %s, want %s", i, j, got.Status, want.Status)
+				}
+			}
+		} else {
+			// Not approved: the contract keeps the original total and stages.
+			if finalContract.TotalAmount != f.contract.TotalAmount {
+				t.Fatalf("iter %d: unapproved change altered total to %v", i, finalContract.TotalAmount)
+			}
+		}
+
+		// A failure must be an explicit conflict/business error, never nil+mutated.
+		if completeErr != nil && !isConflictOrForbidden(completeErr) {
+			t.Fatalf("iter %d: unexpected complete error %v", i, completeErr)
+		}
+		if approveErr != nil && !isConflictOrForbidden(approveErr) {
+			t.Fatalf("iter %d: unexpected approve error %v", i, approveErr)
+		}
+	}
+}
+
+func isConflictOrForbidden(err error) bool {
+	var appErr *constants.AppError
+	if errors.As(err, &appErr) {
+		return appErr.Code == constants.CodeConflict || appErr.Code == constants.CodeForbidden
+	}
+	return errors.Is(err, constants.ErrForbidden) || errors.Is(err, constants.ErrConflict)
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"gorm.io/gorm"
+
 	"github.com/gigmatch/gigmatch/internal/constants"
 	"github.com/gigmatch/gigmatch/internal/model"
 	"github.com/gigmatch/gigmatch/internal/repository"
@@ -11,6 +13,7 @@ import (
 
 // ContractService manages contracts.
 type ContractService struct {
+	db        *gorm.DB
 	contracts *repository.ContractRepository
 	changes   *repository.ContractChangeRepository
 	logs      *OperationLogService
@@ -18,8 +21,8 @@ type ContractService struct {
 }
 
 // NewContractService builds a ContractService.
-func NewContractService(contracts *repository.ContractRepository, changes *repository.ContractChangeRepository, logs *OperationLogService, logger *slog.Logger) *ContractService {
-	return &ContractService{contracts: contracts, changes: changes, logs: logs, logger: logger}
+func NewContractService(db *gorm.DB, contracts *repository.ContractRepository, changes *repository.ContractChangeRepository, logs *OperationLogService, logger *slog.Logger) *ContractService {
+	return &ContractService{db: db, contracts: contracts, changes: changes, logs: logs, logger: logger}
 }
 
 // ListByParty returns contracts involving the caller.
@@ -96,7 +99,11 @@ func (s *ContractService) Sign(id uint, userID uint, userName string) (*model.Co
 }
 
 // Complete confirms completion (requester side). A pending change order pauses
-// completion until the parties settle it.
+// completion until the parties settle it. The status flip, stage update and
+// pending-change check run in one transaction with an optimistic-lock guard,
+// so a completion racing with an approved change has a single stable outcome:
+// exactly one side wins and the loser gets a conflict without any partial
+// write.
 func (s *ContractService) Complete(id uint, userID uint, userName string) (*model.Contract, error) {
 	c, err := s.contracts.FindByID(id)
 	if err != nil {
@@ -108,20 +115,59 @@ func (s *ContractService) Complete(id uint, userID uint, userName string) (*mode
 	if c.Status != constants.ContractInProgress && c.Status != constants.ContractPendingReview {
 		return nil, constants.NewAppError(constants.CodeConflict, "合同当前不可完成确认")
 	}
-	pending, err := s.changes.FindPendingByContractID(c.ID)
+
+	var updated *model.Contract
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		contractsTx := s.contracts.WithTx(tx)
+		changesTx := s.changes.WithTx(tx)
+
+		// Acquire the contract row lock first — the change-approval flow takes
+		// the same lock before it settles an order, so completion and approval
+		// are serialized and this completion can never commit against a change
+		// being approved at the same time.
+		live, txErr := contractsTx.FindByIDForUpdate(c.ID)
+		if txErr != nil {
+			return txErr
+		}
+		if live.Status != constants.ContractInProgress && live.Status != constants.ContractPendingReview {
+			return constants.NewAppError(constants.CodeConflict, "合同当前不可完成确认")
+		}
+		pending, txErr := changesTx.FindPendingByContractID(c.ID)
+		if txErr != nil {
+			return txErr
+		}
+		if pending != nil {
+			return constants.NewAppError(constants.CodeConflict, "存在待处理合同变更，请先处理后再完成合同")
+		}
+
+		finalStages := make([]model.ContractStage, len(live.Stages))
+		copy(finalStages, live.Stages)
+		for i := range finalStages {
+			finalStages[i].Status = "done"
+		}
+		stagesJS, txErr := repository.MarshalStages(finalStages)
+		if txErr != nil {
+			return txErr
+		}
+		ok, txErr := contractsTx.UpdateIfCurrent(live.ID, live.LockVersion, map[string]any{
+			"status": constants.ContractCompleted,
+			"stages": stagesJS,
+		}, constants.ContractInProgress, constants.ContractPendingReview)
+		if txErr != nil {
+			return txErr
+		}
+		if !ok {
+			return constants.NewAppError(constants.CodeConflict, "合同刚被变更或更新，请刷新后重试")
+		}
+		live.Status = constants.ContractCompleted
+		live.Stages = finalStages
+		live.LockVersion++
+		updated = live
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("check pending change: %w", err)
-	}
-	if pending != nil {
-		return nil, constants.NewAppError(constants.CodeConflict, "存在待处理合同变更，请先处理后再完成合同")
-	}
-	c.Status = constants.ContractCompleted
-	for i := range c.Stages {
-		c.Stages[i].Status = "done"
-	}
-	if err := s.contracts.Update(c); err != nil {
-		return nil, fmt.Errorf("complete contract: %w", err)
+		return nil, err
 	}
 	s.logs.Record(userID, userName, "contract.complete", "contract", c.ID, "确认合同完成")
-	return c, nil
+	return updated, nil
 }

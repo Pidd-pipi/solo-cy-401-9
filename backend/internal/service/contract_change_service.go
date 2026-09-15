@@ -17,6 +17,10 @@ import (
 // amountTolerance is the accepted rounding error for money conservation checks.
 const amountTolerance = 0.01
 
+// changeContractStatuses are the contract statuses on which a change order may
+// be raised or applied.
+var changeContractStatuses = []string{constants.ContractInProgress, constants.ContractPendingReview}
+
 // ContractChangeService manages the contract change-order lifecycle.
 type ContractChangeService struct {
 	db        *gorm.DB
@@ -76,11 +80,11 @@ func (s *ContractChangeService) Create(contractID uint, req dto.CreateContractCh
 	for _, st := range req.Stages {
 		proposed = append(proposed, model.ContractStage{Name: st.Name, Amount: st.Amount, Status: st.Status, DueAt: st.DueAt})
 	}
-	if err := validateChangeStages(c.Stages, proposed, c.TotalAmount, req.AmountDelta); err != nil {
+	newAmount, err := validateChangeStages(c.Stages, proposed, c.TotalAmount, req.AmountDelta)
+	if err != nil {
 		return nil, err
 	}
 
-	newAmount := roundAmount(c.TotalAmount + req.AmountDelta)
 	original := make([]model.ContractStage, len(c.Stages))
 	copy(original, c.Stages)
 	party := constants.ChangePartyA
@@ -102,11 +106,38 @@ func (s *ContractChangeService) Create(contractID uint, req dto.CreateContractCh
 		ProposerParty:     party,
 		PendingContractID: &c.ID,
 	}
-	if err := s.changes.Create(change); err != nil {
-		if errors.Is(err, constants.ErrConflict) {
-			return nil, constants.NewAppError(constants.CodeConflict, "该合同已存在待处理变更，请勿重复发起")
+
+	// Inserting the order and taking an optimistic-lock step on the contract are
+	// committed together. The version bump serializes the proposal against a
+	// concurrent completion/approval; a lost race rolls the whole insert back.
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		changesTx := s.changes.WithTx(tx)
+		contractsTx := s.contracts.WithTx(tx)
+
+		pendingTx, txErr := changesTx.FindPendingByContractID(c.ID)
+		if txErr != nil {
+			return txErr
 		}
-		return nil, fmt.Errorf("create contract change: %w", err)
+		if pendingTx != nil {
+			return constants.NewAppError(constants.CodeConflict, "该合同已存在待处理变更，请勿重复发起")
+		}
+		ok, txErr := contractsTx.UpdateIfCurrent(c.ID, c.LockVersion, nil, changeContractStatuses...)
+		if txErr != nil {
+			return txErr
+		}
+		if !ok {
+			return constants.NewAppError(constants.CodeConflict, "合同状态已变化，请刷新后重试")
+		}
+		if err := changesTx.Create(change); err != nil {
+			if errors.Is(err, constants.ErrConflict) {
+				return constants.NewAppError(constants.CodeConflict, "该合同已存在待处理变更，请勿重复发起")
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	s.logs.Record(userID, userName, "contract_change.create", "contract_change", change.ID, fmt.Sprintf("发起合同变更 %s，金额 %.2f", c.ContractNo, req.AmountDelta))
 	return change, nil
@@ -179,8 +210,21 @@ func (s *ContractChangeService) settle(contractID, changeID, userID uint, userNa
 		changesTx := s.changes.WithTx(tx)
 		contractsTx := s.contracts.WithTx(tx)
 
-		// Conditional transition is the concurrency guard: approve/reject/withdraw
-		// races can affect at most one row.
+		// Lock the contract row before touching the change order. Completion
+		// acquires the same lock first, so the two flows are serialized: the
+		// loser re-reads the winner's committed state and either proceeds
+		// consistently or fails cleanly — never a partial write.
+		locked, txErr := contractsTx.FindByIDForUpdate(c.ID)
+		if txErr != nil {
+			return txErr
+		}
+		if toStatus == constants.ChangeApproved &&
+			locked.Status != constants.ContractInProgress && locked.Status != constants.ContractPendingReview {
+			return constants.NewAppError(constants.CodeConflict, "合同已完成，无法应用变更")
+		}
+
+		// Conditional transition is the second concurrency guard: approve/reject/
+		// withdraw races can affect at most one row.
 		ok, txErr := changesTx.Transition(ch.ID, constants.ChangePending, toStatus, userID, userName)
 		if txErr != nil {
 			return txErr
@@ -193,35 +237,92 @@ func (s *ContractChangeService) settle(contractID, changeID, userID uint, userNa
 			return nil
 		}
 
-		live, txErr := contractsTx.FindByID(c.ID)
+		stagesJS, txErr := repository.MarshalStages(ch.ProposedStages)
 		if txErr != nil {
 			return txErr
 		}
-		if live.Status != constants.ContractInProgress && live.Status != constants.ContractPendingReview {
-			return constants.NewAppError(constants.CodeConflict, "合同状态已变化，无法应用变更")
-		}
-		live.TotalAmount = ch.NewAmount
-		live.Stages = append([]model.ContractStage(nil), ch.ProposedStages...)
-		if txErr := contractsTx.Update(live); txErr != nil {
+		ok, txErr = contractsTx.UpdateIfCurrent(locked.ID, locked.LockVersion, map[string]any{
+			"total_amount": ch.NewAmount,
+			"stages":       stagesJS,
+		}, changeContractStatuses...)
+		if txErr != nil {
 			return txErr
 		}
-		updated = live
+		if !ok {
+			return constants.NewAppError(constants.CodeConflict, "合同已完成或已被另一方处理，变更未应用")
+		}
+		// Read back inside the transaction (the row is locked for the rest of
+		// this unit of work) and verify the persisted contract fully matches the
+		// approved order. Any inconsistency rolls back both rows, so no partial
+		// update can survive a concurrent completion or stale snapshot.
+		written, txErr := contractsTx.FindByID(locked.ID)
+		if txErr != nil {
+			return txErr
+		}
+		if txErr := verifyAppliedChange(written, ch); txErr != nil {
+			return fmt.Errorf("verify applied change: %w", txErr)
+		}
+		updated = written
 		return nil
 	})
 	if err != nil {
-		var appErr *constants.AppError
-		if errors.As(err, &appErr) {
-			return nil, nil, err
-		}
-		return nil, nil, fmt.Errorf("%s contract change: %w", action, err)
+		return nil, nil, err
 	}
 
 	finalChange, err := s.changes.FindByID(ch.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reload contract change: %w", err)
 	}
+	if toStatus == constants.ChangeApproved {
+		// Post-commit read-back: a concurrent completion may legitimately flip
+		// stage statuses to done afterwards, but the immutable money invariant
+		// must still hold — total == sum of every stage amount.
+		reloaded, rerr := s.contracts.FindByID(c.ID)
+		if rerr != nil {
+			return nil, nil, fmt.Errorf("reload approved contract: %w", rerr)
+		}
+		if rerr := verifyContractMoneyInvariant(reloaded); rerr != nil {
+			return nil, nil, rerr
+		}
+		updated = reloaded
+	}
 	s.logs.Record(userID, userName, "contract_change."+toStatus, "contract_change", ch.ID, action+"合同变更")
 	return finalChange, updated, nil
+}
+
+// verifyAppliedChange is run inside the approval transaction against the
+// freshly written row. It enforces total == sum(all stages) == approved new
+// amount and a stage-for-stage match with the approved proposal.
+func verifyAppliedChange(c *model.Contract, ch *model.ContractChange) error {
+	if err := verifyContractMoneyInvariant(c); err != nil {
+		return err
+	}
+	if !amountsEqual(c.TotalAmount, ch.NewAmount) {
+		return fmt.Errorf("合同金额一致性校验失败：合同总额 %.2f 不等于已批准新总额 %.2f", c.TotalAmount, ch.NewAmount)
+	}
+	if len(c.Stages) != len(ch.ProposedStages) {
+		return fmt.Errorf("合同金额一致性校验失败：阶段数量不匹配")
+	}
+	for i := range c.Stages {
+		got, want := c.Stages[i], ch.ProposedStages[i]
+		if got.Name != want.Name || got.Status != want.Status || !amountsEqual(got.Amount, want.Amount) {
+			return fmt.Errorf("合同金额一致性校验失败：第 %d 个阶段与已批准内容不一致", i+1)
+		}
+	}
+	return nil
+}
+
+// verifyContractMoneyInvariant enforces total == sum of every stage amount.
+func verifyContractMoneyInvariant(c *model.Contract) error {
+	var stageSum float64
+	for _, st := range c.Stages {
+		stageSum += st.Amount
+	}
+	stageSum = roundAmount(stageSum)
+	if !amountsEqual(stageSum, c.TotalAmount) {
+		return fmt.Errorf("合同金额一致性校验失败：阶段金额合计 %.2f 不等于合同总额 %.2f", stageSum, c.TotalAmount)
+	}
+	return nil
 }
 
 func (s *ContractChangeService) loadPartyContract(contractID, userID uint) (*model.Contract, error) {
@@ -246,30 +347,60 @@ func (s *ContractChangeService) loadOwnedChange(contractID, changeID uint) (*mod
 	return ch, nil
 }
 
-// validateChangeStages enforces the money-conservation invariant: the amounts
-// of unfinished stages (status != done) must add up to the proposed new total
-// (current total + amount delta).
-func validateChangeStages(original, proposed []model.ContractStage, originalTotal, delta float64) error {
-	_ = original
+// validateChangeStages enforces money conservation while preserving settled
+// milestones:
+//   - the stage list keeps the same length, and every originally done stage is
+//     frozen — identical name, amount and status;
+//   - only unfinished stages may change, and a previously unfinished stage may
+//     not be flipped to done through a change order;
+//   - proposed total = current total + amount delta must equal
+//     sum(frozen done amounts) + sum(proposed unfinished amounts), i.e. the
+//     finished payments plus the remaining work.
+//
+// It returns the validated proposed new total.
+func validateChangeStages(original, proposed []model.ContractStage, originalTotal, delta float64) (float64, error) {
 	newAmount := roundAmount(originalTotal + delta)
 	if newAmount < 0 {
-		return constants.NewAppError(constants.CodeBadRequest, "变更后合同总额不能为负")
+		return 0, constants.NewAppError(constants.CodeBadRequest, "变更后合同总额不能为负")
 	}
 	if len(proposed) == 0 {
-		return constants.NewAppError(constants.CodeBadRequest, "至少保留一个合同阶段")
+		return 0, constants.NewAppError(constants.CodeBadRequest, "至少保留一个合同阶段")
+	}
+	if len(proposed) != len(original) {
+		return 0, constants.NewAppError(constants.CodeBadRequest, "已完成阶段不可删除，阶段数量必须保持不变")
 	}
 
-	var unfinishedSum float64
-	for _, st := range proposed {
-		if st.Status != "done" {
-			unfinishedSum += st.Amount
+	var doneSum, unfinishedSum float64
+	for i := range original {
+		got, want := proposed[i], original[i]
+		switch {
+		case want.Status == "done":
+			if got.Status != "done" || got.Name != want.Name || !amountsEqual(got.Amount, want.Amount) {
+				return 0, constants.NewAppError(constants.CodeBadRequest,
+					fmt.Sprintf("已完成阶段「%s」的名称、金额和状态不可调整", want.Name))
+			}
+			doneSum += got.Amount
+		case got.Status == "done":
+			return 0, constants.NewAppError(constants.CodeBadRequest,
+				fmt.Sprintf("阶段「%s」尚未完成，不能通过变更单标记为已完成", want.Name))
+		default:
+			if got.Amount < 0 {
+				return 0, constants.NewAppError(constants.CodeBadRequest, "阶段金额不能为负")
+			}
+			unfinishedSum += got.Amount
 		}
 	}
-	if !amountsEqual(roundAmount(unfinishedSum), newAmount) {
-		return constants.NewAppError(constants.CodeBadRequest,
-			fmt.Sprintf("金额不守恒：未完成阶段金额合计 %.2f 必须等于新总额 %.2f", roundAmount(unfinishedSum), newAmount))
+
+	if roundAmount(doneSum) > newAmount {
+		return 0, constants.NewAppError(constants.CodeBadRequest,
+			fmt.Sprintf("新总额 %.2f 不能低于已完成阶段金额合计 %.2f", newAmount, roundAmount(doneSum)))
 	}
-	return nil
+	if !amountsEqual(roundAmount(doneSum+unfinishedSum), newAmount) {
+		return 0, constants.NewAppError(constants.CodeBadRequest,
+			fmt.Sprintf("金额不守恒：已完成金额 %.2f 与未完成阶段金额合计 %.2f 之和必须等于新总额 %.2f",
+				roundAmount(doneSum), roundAmount(unfinishedSum), newAmount))
+	}
+	return newAmount, nil
 }
 
 func roundAmount(v float64) float64 {

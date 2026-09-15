@@ -102,35 +102,48 @@
             <b>{{ formatCurrency(newTotal) }}</b>
           </span>
         </el-form-item>
-        <el-form-item label="阶段金额调整（未完成阶段合计必须等于新总额）" required>
+        <el-form-item label="阶段金额调整（已完成阶段冻结，仅可调整未完成阶段）" required>
           <el-table :data="form.stages" size="small" border style="width: 100%">
             <el-table-column label="阶段" min-width="120">
-              <template #default="{ row }"><el-input v-model="row.name" size="small" /></template>
+              <template #default="{ row, $index }">
+                <el-input v-model="row.name" size="small" :disabled="isFrozen($index)" />
+              </template>
             </el-table-column>
             <el-table-column label="金额（元）" min-width="140">
-              <template #default="{ row }">
-                <el-input-number v-model="row.amount" :min="0" :precision="2" :controls="false" size="small" style="width: 120px" />
+              <template #default="{ row, $index }">
+                <el-input-number
+                  v-model="row.amount"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  size="small"
+                  :disabled="isFrozen($index)"
+                  style="width: 120px"
+                />
               </template>
             </el-table-column>
             <el-table-column label="状态" width="120">
-              <template #default="{ row }">
-                <el-select v-model="row.status" size="small">
-                  <el-option label="待开始" value="pending" />
-                  <el-option label="进行中" value="in_progress" />
-                  <el-option label="已完成" value="done" />
+              <template #default="{ row, $index }">
+                <el-select v-model="row.status" size="small" :disabled="isFrozen($index)">
+                  <el-option v-if="isFrozen($index)" label="已完成" value="done" />
+                  <template v-else>
+                    <el-option label="待开始" value="pending" />
+                    <el-option label="进行中" value="in_progress" />
+                  </template>
                 </el-select>
               </template>
             </el-table-column>
             <el-table-column label="时间节点" min-width="130">
-              <template #default="{ row }"><el-input v-model="row.dueAt" size="small" /></template>
+              <template #default="{ row, $index }"><el-input v-model="row.dueAt" size="small" :disabled="isFrozen($index)" /></template>
             </el-table-column>
           </el-table>
         </el-form-item>
         <div class="conservation">
+          <span>已完成金额合计：<b>{{ formatCurrency(doneSum) }}</b></span>
           <span>未完成阶段合计：<b :class="conservationOk ? 'ok' : 'bad'">{{ formatCurrency(unfinishedSum) }}</b></span>
           <span>新总额：<b :class="conservationOk ? 'ok' : 'bad'">{{ formatCurrency(newTotal) }}</b></span>
           <el-tag v-if="conservationOk" type="success" size="small">金额守恒</el-tag>
-          <el-tag v-else type="danger" size="small">金额不守恒</el-tag>
+          <el-tag v-else type="danger" size="small">已完成 + 未完成 ≠ 新总额</el-tag>
         </div>
       </el-form>
       <template #footer>
@@ -176,6 +189,13 @@ const form = ref<{ reason: string; scope: string; amountDelta: number; stages: C
 });
 
 const newTotal = computed(() => Math.round((props.contract.totalAmount + form.value.amountDelta) * 100) / 100);
+const doneSum = computed(() =>
+  Math.round(
+    form.value.stages
+      .filter((s) => s.status === 'done')
+      .reduce((sum, s) => sum + (Number(s.amount) || 0), 0) * 100
+  ) / 100
+);
 const unfinishedSum = computed(() =>
   Math.round(
     form.value.stages
@@ -183,14 +203,36 @@ const unfinishedSum = computed(() =>
       .reduce((sum, s) => sum + (Number(s.amount) || 0), 0) * 100
   ) / 100
 );
+// Freezing is anchored to the ORIGINAL contract snapshot: a stage settled
+// before the change was raised can never be edited, regardless of what the form
+// row status currently shows.
+function isFrozen(index: number): boolean {
+  return props.contract.stages[index]?.status === 'done';
+}
 const conservationOk = computed(
-  () => Math.abs(unfinishedSum.value - newTotal.value) < 0.01 && newTotal.value >= 0
+  () =>
+    Math.abs(doneSum.value + unfinishedSum.value - newTotal.value) < 0.01 &&
+    newTotal.value >= 0 &&
+    doneSumOk.value
+);
+// Done rows must retain their original name/amount/status.
+const doneSumOk = computed(() =>
+  form.value.stages.every((s, i) => {
+    if (!isFrozen(i)) return true;
+    const orig = props.contract.stages[i];
+    return (
+      s.status === 'done' &&
+      s.name === orig.name &&
+      Math.abs((Number(s.amount) || 0) - orig.amount) < 0.01
+    );
+  })
 );
 const canSubmit = computed(
   () =>
     form.value.reason.trim().length >= 2 &&
     form.value.scope.trim().length >= 2 &&
     form.value.stages.length > 0 &&
+    form.value.stages.every((s, i) => isFrozen(i) || s.status !== 'done') &&
     conservationOk.value
 );
 

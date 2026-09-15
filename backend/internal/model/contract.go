@@ -26,6 +26,7 @@ type Contract struct {
 	RequirementID uint      `gorm:"index;not null" json:"requirementId"`
 	PartyAID      uint      `gorm:"index;not null" json:"partyAId"`
 	PartyBID      uint      `gorm:"index;not null" json:"partyBId"`
+	LockVersion   int       `gorm:"column:lock_version;not null;default:0" json:"-"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"-"`
 

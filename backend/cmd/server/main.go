@@ -146,7 +146,7 @@ func buildHandlers(cfg *config.Config, db *gorm.DB, logger *slog.Logger) (*route
 	logSvc := service.NewOperationLogService(logRepo, logger)
 	authSvc := service.NewAuthService(cfg, userRepo, logSvc, logger)
 	userSvc := service.NewUserService(userRepo, logSvc, logger)
-	contractSvc := service.NewContractService(contractRepo, changeRepo, logSvc, logger)
+	contractSvc := service.NewContractService(db, contractRepo, changeRepo, logSvc, logger)
 	changeSvc := service.NewContractChangeService(db, contractRepo, changeRepo, logSvc, logger)
 	bidSvc := service.NewBidService(bidRepo, reqRepo, logSvc, logger)
 	reqSvc := service.NewRequirementService(reqRepo, bidRepo, logSvc, logger)

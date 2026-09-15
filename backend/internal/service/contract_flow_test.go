@@ -47,7 +47,7 @@ func TestAcceptBidCreatesContract(t *testing.T) {
 	}
 
 	logSvc := NewOperationLogService(logRepo, logger)
-	contractSvc := NewContractService(contractRepo, changeRepo, logSvc, logger)
+	contractSvc := NewContractService(db, contractRepo, changeRepo, logSvc, logger)
 	reqSvc := NewRequirementService(reqRepo, bidRepo, logSvc, logger)
 	bidSvc := NewBidService(bidRepo, reqRepo, logSvc, logger)
 
